@@ -2,6 +2,1066 @@
 Nới chứa lời giải Bài Tập đã code
 # Đây là sách về Thư Viện VL53
 
+# HƯỚNG DẪN SỬ DỤNG
+## Thư viện VL53L0X đa cảm biến cho STM32 HAL (`tof_multi` + API ST v1.0.4)
+
+> **Dành cho ai?** Người muốn **tải về và dùng ngay**: nối dây, thêm file, gọi vài hàm là có khoảng cách.
+> Mỗi hàm có: **công dụng → cú pháp → tham số → kết quả → ví dụ ngắn → lưu ý**.
+> Muốn hiểu sâu (lý thuyết, bài tập, lời giải) thì đọc bộ sách trong [`docs/`](docs/README.md).
+>
+> ⚠️ Thư viện đã được kiểm thử trên **bộ giả lập** (biên dịch GCC, chạy với nhiều cảm biến ảo trên cùng bus I2C). **Chưa chạy trên mạch thật và Keil thật.** Nếu thấy kết quả khác hướng dẫn, xem [mục 12](#12-sự-cố-thường-gặp).
+
+---
+
+## Mục lục
+
+1. [Thư viện làm được gì](#1-thư-viện-làm-được-gì)
+2. [Bắt đầu nhanh trong 5 bước](#2-bắt-đầu-nhanh-trong-5-bước)
+3. [Các file trong gói](#3-các-file-trong-gói)
+4. [Khai báo cảm biến: `TOF_Sensor` và `TOF_Bus`](#4-khai-báo-cảm-biến-tof_sensor-và-tof_bus)
+5. [Bảng tóm tắt tất cả các hàm](#5-bảng-tóm-tắt-tất-cả-các-hàm)
+6. [Các hàm chính của `tof_multi`](#6-các-hàm-chính-của-tof_multi)
+7. [Đọc dữ liệu trong `TOF_Sensor`](#7-đọc-dữ-liệu-trong-tof_sensor)
+8. [Chương trình chạy thử có sẵn](#8-chương-trình-chạy-thử-có-sẵn)
+9. [Các hàm nâng cao của ST](#9-các-hàm-nâng-cao-của-st)
+10. [Các hàm cấp thấp (platform)](#10-các-hàm-cấp-thấp-platform)
+11. [Tuỳ chỉnh bằng macro](#11-tuỳ-chỉnh-bằng-macro)
+12. [Sự cố thường gặp](#12-sự-cố-thường-gặp)
+13. [Bảng tra mã lỗi và trạng thái](#13-bảng-tra-mã-lỗi-và-trạng-thái)
+14. [Nên và không nên](#14-nên-và-không-nên)
+
+---
+
+## 1. Thư viện làm được gì
+
+| Tính năng | Chi tiết |
+|---|---|
+| Nhiều cảm biến trên **một** bus I2C | 1–32 cảm biến, mỗi con một chân XSHUT. Thư viện tự gán địa chỉ |
+| Đo **không chặn CPU** | Gọi `TOF_Poll()` trong `while(1)`; mỗi lần gọi chặn tối đa ~3 ms |
+| Hai chế độ đo | **Song song** (~30 lần/s mỗi con) hoặc **tuần tự** (chống nhiễu giữa các cảm biến đặt sát nhau) |
+| Tự phát hiện lỗi | Cảm biến mất dây, treo, không có dữ liệu → trạng thái `ERROR` kèm mã lỗi |
+| Tự phục hồi | `TOF_Restart()` một cảm biến; `TOF_I2C_Recover()` gỡ bus bị treo |
+| Hiệu chuẩn offset | `TOF_CalibrateOffset()`; lưu kết quả để dùng lại lần sau |
+| Dùng được mọi hàm của ST | Mỗi cảm biến có sẵn `tof[i].dev` để gọi API gốc của ST |
+
+**Yêu cầu:**
+- STM32 dùng HAL. Hướng dẫn viết cho STM32F103C8T6; dòng khác chỉ cần đổi một macro.
+- Module VL53L0X (GY-530 / GY-VL53L0XV2).
+- Keil MDK hoặc STM32CubeIDE; trình biên dịch ở chế độ **C99**.
+
+---
+
+## 2. Bắt đầu nhanh trong 5 bước
+
+### Bước 1 — Nối dây (2 cảm biến)
+
+| Module VL53L0X | TOF1 | TOF2 | STM32F103 (Blue Pill) |
+|---|---|---|---|
+| VIN | ● | ● | 3.3V |
+| GND | ● | ● | GND |
+| SCL | ● | ● | PB6 (nối chung) |
+| SDA | ● | ● | PB7 (nối chung) |
+| XSHUT | ● | | PA0 |
+| XSHUT | | ● | PA1 |
+| GPIO1 (không bắt buộc) | ● | | PB0 |
+| GPIO1 (không bắt buộc) | | ● | PB1 |
+
+**Bóc miếng dán bảo vệ** màu vàng/cam trên mắt cảm biến.
+
+### Bước 2 — STM32CubeMX
+
+| Mục | Thiết lập |
+|---|---|
+| SYS | Debug = **Serial Wire** |
+| RCC / Clock | HSE Crystal → PLL ×9 → **72 MHz** |
+| I2C1 | **Standard mode 100 kHz** |
+| PA0, PA1 | GPIO_Output, **Open Drain**, mức **Low**, label `XSHUT1`, `XSHUT2` |
+| PB0, PB1 | GPIO_Input, **Pull-up**, label `TOF1_INT`, `TOF2_INT` |
+| Project Manager | Toolchain **MDK-ARM**, Minimum Stack **0x800** |
+
+### Bước 3 — Thêm thư viện vào Keil
+
+1. Chép thư mục `vl53l0x_stm32` vào thư mục project, đổi tên thành `VL53L0X`.
+2. Tạo group `VL53L0X`, thêm các file:
+   - `st_core/vl53l0x_api.c`, `vl53l0x_api_core.c`, `vl53l0x_api_calibration.c`, `vl53l0x_api_strings.c`, `vl53l0x_api_ranging.c`
+   - `platform/vl53l0x_platform.c`
+   - `tof/tof_multi.c`
+3. *Options for Target → C/C++*:
+   - **Include Paths:** `../VL53L0X/st_core;../VL53L0X/platform;../VL53L0X/tof;../VL53L0X/app`
+   - **Define:** `USE_HAL_DRIVER,STM32F103xB,USE_I2C_2V8`
+   - Bật **C99** (AC5: tick *C99 Mode*; AC6: Language C = *c99*)
+
+### Bước 4 — Viết code
+
+Tạo file `my_tof.c`:
+```c
+#include "main.h"
+#include "tof_multi.h"
+
+extern I2C_HandleTypeDef hi2c1;
+
+TOF_Sensor tof[2] = {
+    { .xshut_port = XSHUT1_GPIO_Port, .xshut_pin = XSHUT1_Pin,
+      .gpio1_port = TOF1_INT_GPIO_Port, .gpio1_pin = TOF1_INT_Pin, .addr = 0x54 },
+    { .xshut_port = XSHUT2_GPIO_Port, .xshut_pin = XSHUT2_Pin,
+      .gpio1_port = TOF2_INT_GPIO_Port, .gpio1_pin = TOF2_INT_Pin, .addr = 0x56 },
+};
+TOF_Bus bus = { .hi2c = &hi2c1, .sensor = tof, .count = 2, .mode = TOF_MODE_PARALLEL };
+
+volatile uint16_t distance_mm[2];    /* xem trong Watch cua Keil */
+
+void MyTOF_Init(void)
+{
+    TOF_Init(&bus);
+}
+
+void MyTOF_Loop(void)
+{
+    uint16_t mm;
+    uint8_t  i;
+
+    TOF_Poll(&bus);
+    for (i = 0; i < 2; i++)
+        if (TOF_GetRange(&bus, i, 100, &mm))
+            distance_mm[i] = mm;
+}
+```
+
+Trong `main.c`:
+```c
+/* USER CODE BEGIN 0 */
+void MyTOF_Init(void);
+void MyTOF_Loop(void);
+/* USER CODE END 0 */
+
+  /* USER CODE BEGIN 2 */
+  MyTOF_Init();
+  /* USER CODE END 2 */
+
+  while (1)
+  {
+    /* USER CODE END WHILE */
+    /* USER CODE BEGIN 3 */
+    MyTOF_Loop();
+  }
+```
+
+### Bước 5 — Chạy và xem kết quả
+
+1. F7 (build) → Ctrl+F5 (debug) → F5 (run).
+2. Mở *View → Watch 1*, gõ `distance_mm`, bật *View → Periodic Window Update*.
+3. Đưa tay trước cảm biến: giá trị thay đổi theo khoảng cách.
+
+> 💡 Không thấy gì? Dùng chương trình chạy thử có sẵn (mục 8) để biết lỗi ở đâu.
+
+---
+
+## 3. Các file trong gói
+
+```
+vl53l0x_stm32/
+├── st_core/    Lõi đo của ST: THÊM toàn bộ file .c
+├── platform/   Nối với HAL: THÊM vl53l0x_platform.c
+├── tof/        tof_multi.c: THÊM.   tof_example.c: KHÔNG thêm (ví dụ tham khảo)
+├── app/        Chương trình chạy thử: thêm MỘT trong hai file (mục 8)
+├── docs/       Bộ sách học
+├── README.md
+└── HUONG_DAN_SU_DUNG.md   ← file này
+```
+
+| Không được thêm vào project | Lý do |
+|---|---|
+| `vl53l0x_i2c_platform.c`, `vl53l0x_i2c_win_serial_comms.c`, `vl53l0x_platform_log.c` (bản gốc ST) | Code cho PC Windows |
+| Cả hai file `app_tof_test.c` và `app_tof_dbg.c` cùng lúc | Trùng tên biến; `app_tof_test.c` cần UART |
+| `#include "vl53l0x_tuning.h"` trong file của bạn | Gây lỗi link "multiple definition" |
+
+---
+
+## 4. Khai báo cảm biến: `TOF_Sensor` và `TOF_Bus`
+
+### 4.1. `TOF_Sensor`: một cảm biến
+
+**Bạn điền:**
+
+| Trường | Bắt buộc | Ý nghĩa | Ví dụ |
+|---|---|---|---|
+| `xshut_port`, `xshut_pin` | ✔ | Chân XSHUT | `GPIOA`, `GPIO_PIN_0` |
+| `gpio1_port`, `gpio1_pin` | | Chân GPIO1. Bỏ trống (= `NULL`) thì thư viện hỏi qua I2C | `GPIOB`, `GPIO_PIN_0` |
+| `addr` | ✔ | Địa chỉ mới, **8-bit**: chẵn, 0x10–0xEE, ≠ 0x52, không trùng | `0x54` |
+| `calib` | | Dữ liệu hiệu chuẩn đã lưu (mục 7.6) | |
+
+**Ví dụ: cảm biến không nối GPIO1**
+```c
+TOF_Sensor tof_front = { .xshut_port = GPIOA, .xshut_pin = GPIO_PIN_2, .addr = 0x58 };
+```
+
+> 💡 Địa chỉ gợi ý: 0x54, 0x56, 0x58, 0x5A… Tránh **0x4E** và **0x7E** nếu có LCD PCF8574 trên cùng bus.
+
+### 4.2. `TOF_Bus`: một nhóm cảm biến trên một bus I2C
+
+| Trường | Mặc định khi để 0 | Ý nghĩa |
+|---|---|---|
+| `hi2c` | — (bắt buộc) | `&hi2c1`, `&hi2c2`… |
+| `sensor` | — (bắt buộc) | Tên mảng `TOF_Sensor` |
+| `count` | — (bắt buộc) | Số cảm biến (1–32) |
+| `mode` | `TOF_MODE_PARALLEL` | `TOF_MODE_PARALLEL` hoặc `TOF_MODE_SEQUENTIAL` |
+| `budget_us` | 33000 | Thời gian một lần đo (µs): 20000 nhanh, 200000 chính xác |
+| `poll_ms` | 10 | Chu kỳ hỏi qua I2C khi không có GPIO1 |
+| `sigma_check` | 0 (tắt) | 1 = bật lọc sigma của ST (chậm hơn ~4 lần) |
+
+**Ví dụ: đầy đủ tuỳ chọn**
+```c
+TOF_Bus bus_full = {
+    .hi2c        = &hi2c1,
+    .sensor      = tof,
+    .count       = 2,
+    .mode        = TOF_MODE_SEQUENTIAL,  /* 2 cam bien dat sat nhau, cung huong */
+    .budget_us   = 50000,                /* 50 ms/lan do: on dinh hon */
+    .poll_ms     = 10,
+    .sigma_check = 0,
+};
+```
+
+**Chọn chế độ nào?**
+
+| Tình huống | Chế độ |
+|---|---|
+| Các cảm biến nhìn các hướng khác nhau (lệch nhau > 25°) | `TOF_MODE_PARALLEL` (nhanh nhất) |
+| Các cảm biến đặt sát nhau, nhìn cùng hướng | `TOF_MODE_SEQUENTIAL` (không nhiễu, chậm hơn N lần) |
+| Có cả hai nhóm | Hai `TOF_Bus` trên cùng `hi2c1`: một song song, một tuần tự. Địa chỉ giữa hai nhóm phải khác nhau |
+
+**Ví dụ: hai nhóm trên cùng một I2C**
+```c
+TOF_Sensor front[2] = { { .xshut_port = GPIOA, .xshut_pin = GPIO_PIN_0, .addr = 0x54 },
+                        { .xshut_port = GPIOA, .xshut_pin = GPIO_PIN_1, .addr = 0x56 } };
+TOF_Sensor side[2]  = { { .xshut_port = GPIOA, .xshut_pin = GPIO_PIN_2, .addr = 0x58 },
+                        { .xshut_port = GPIOA, .xshut_pin = GPIO_PIN_3, .addr = 0x5A } };
+TOF_Bus bus_front = { .hi2c = &hi2c1, .sensor = front, .count = 2, .mode = TOF_MODE_SEQUENTIAL };
+TOF_Bus bus_side  = { .hi2c = &hi2c1, .sensor = side,  .count = 2, .mode = TOF_MODE_PARALLEL };
+/* TOF_Init(&bus_front); TOF_Init(&bus_side);  -- trong while(1): TOF_Poll ca hai */
+```
+
+---
+
+## 5. Bảng tóm tắt tất cả các hàm
+
+### Hàm của thư viện (`tof_multi.h`): đủ cho 90% trường hợp
+
+| Hàm | Làm gì | Gọi khi nào | Chặn CPU |
+|---|---|---|---|
+| `TOF_Init(&bus)` | Gán địa chỉ, khởi tạo, bắt đầu đo | 1 lần lúc khởi động | ~0,2 s/cảm biến |
+| `TOF_Poll(&bus)` | Đọc số đo mới; trả bitmask | **Mỗi vòng `while(1)`** | ≤ ~3 ms |
+| `TOF_GetRange(&bus, i, age, &mm)` | Lấy khoảng cách hợp lệ của cảm biến i | Bất cứ lúc nào | Không |
+| `TOF_Restart(&bus, i)` | Khởi động lại riêng cảm biến i | Khi `state == ERROR` | ~0,2 s |
+| `TOF_CalibrateOffset(&bus, i, mm)` | Hiệu chuẩn offset | Khi lắp đặt / bấm nút | ~2 s |
+| `TOF_I2C_Recover(&hi2c, port, scl, sda)` | Gỡ bus I2C bị treo | Khi tất cả cảm biến cùng lỗi | < 1 ms |
+
+### Chương trình chạy thử (`app/`)
+
+| Hàm | Làm gì |
+|---|---|
+| `App_TOF_Test_Init()` / `App_TOF_Test_Loop()` | Chạy thử 2 cảm biến, in kết quả qua UART |
+| `App_TOF_Dbg_Init()` / `App_TOF_Dbg_Loop()` | Chạy thử 2 cảm biến, xem bằng Watch (biến `g_tof`) |
+| `App_TOF_Dbg_OnError(idx)` | Đặt breakpoint ở đây để dừng khi cảm biến lỗi |
+
+### Hàm nâng cao của ST (gọi trên `&tof[i].dev`)
+
+| Nhóm | Hàm |
+|---|---|
+| Thời gian đo | `VL53L0X_SetMeasurementTimingBudgetMicroSeconds`, `Get…` |
+| Tầm đo | `VL53L0X_SetVcselPulsePeriod`, `GetVcselPulsePeriod` |
+| Ngưỡng chất lượng | `VL53L0X_SetLimitCheckValue`, `GetLimitCheckValue`, `SetLimitCheckEnable`, `GetLimitCheckEnable`, `GetLimitCheckCurrent` |
+| Dữ liệu chi tiết | `VL53L0X_GetRangingMeasurementData` |
+| Offset / crosstalk | `VL53L0X_Get/SetOffsetCalibrationDataMicroMeter`, `PerformXTalkCalibration`, `Set/GetXTalkCompensationRateMegaCps`, `Set/GetXTalkCompensationEnable` |
+| Điều khiển đo | `VL53L0X_StopMeasurement`, `StartMeasurement`, `ClearInterruptMask`, `GetDeviceMode` |
+| Thông tin | `VL53L0X_GetVersion`, `GetDeviceInfo`, `GetProductRevision`, `GetReferenceSpads`, `GetRefCalibration`, `GetPalState` |
+| Chuỗi mô tả | `VL53L0X_GetPalErrorString`, `GetRangeStatusString` |
+| Ngắt theo ngưỡng | `VL53L0X_SetGpioConfig`, `SetInterruptThresholds` (có cảnh báo) |
+
+### Hàm cấp thấp (platform)
+
+`VL53L0X_RdByte`, `RdWord`, `RdDWord`, `WrByte`, `WrWord`, `WrDWord`, `ReadMulti`, `WriteMulti`, `UpdateByte`, `PollingDelay`.
+
+---
+
+## 6. Các hàm chính của `tof_multi`
+
+### 6.1. `TOF_Init` — khởi tạo tất cả cảm biến
+
+```c
+uint8_t TOF_Init(TOF_Bus *bus);
+```
+
+| | |
+|---|---|
+| **Công dụng** | Tắt hết → bật từng con → đổi địa chỉ → khởi tạo theo chuẩn ST → bắt đầu đo |
+| **Tham số** | `bus`: đã điền `hi2c`, `sensor`, `count`, `mode` |
+| **Trả về** | Số cảm biến chạy được (0 … `count`) |
+| **Gọi khi** | **Một lần**, sau `MX_GPIO_Init()` và `MX_I2C1_Init()` |
+| **Chặn CPU** | ~0,2–0,3 s mỗi cảm biến |
+
+**Ví dụ:**
+```c
+uint8_t n = TOF_Init(&bus);          /* goi 1 lan, sau MX_I2C1_Init() */
+if (n != bus.count) {
+    /* co cam bien loi: xem tof[i].state va tof[i].last_error */
+}
+```
+
+**Lưu ý:**
+- Gọi lại `TOF_Init` được, ví dụ khi đổi chế độ đo; mọi cảm biến bị khởi tạo lại. Dữ liệu `calib` được giữ.
+- Cảm biến lỗi khi khởi tạo bị giữ tắt (XSHUT thấp) để không làm hỏng các con khác.
+
+---
+
+### 6.2. `TOF_Poll` — đọc số đo mới (gọi liên tục)
+
+```c
+uint32_t TOF_Poll(TOF_Bus *bus);
+```
+
+| | |
+|---|---|
+| **Công dụng** | Kiểm tra cảm biến nào đã đo xong và đọc kết quả; phát hiện lỗi |
+| **Trả về** | **Bitmask**: bit i = 1 nghĩa là cảm biến i vừa có số đo mới |
+| **Gọi khi** | **Mỗi vòng `while(1)`, đúng một lần** |
+| **Chặn CPU** | Thường gần 0; tối đa ~3 ms (song song) / ~6 ms (tuần tự) |
+
+**Ví dụ:**
+```c
+uint32_t upd = TOF_Poll(&bus);       /* goi MOT lan moi vong while(1) */
+if (upd & (1UL << 0)) { /* cam bien 0 co so do moi */ }
+if (upd & (1UL << 1)) { /* cam bien 1 co so do moi */ }
+```
+
+**Lưu ý:**
+- Bit bằng 1 chỉ có nghĩa là **có số đo mới**, kể cả số đo **không hợp lệ** (không có vật). Dùng `TOF_GetRange`, hoặc kiểm tra `tof[i].range_status == 0`.
+- Bitmask: 0x01 = cảm biến 0, 0x02 = cảm biến 1, 0x03 = cả hai. **Không** viết `if (upd == 1)` để kiểm tra cảm biến 1.
+- **Không** gọi trong hàm ngắt.
+
+---
+
+### 6.3. `TOF_GetRange` — lấy khoảng cách tin cậy
+
+```c
+uint8_t TOF_GetRange(const TOF_Bus *bus, uint8_t i, uint32_t max_age_ms, uint16_t *mm);
+```
+
+| | |
+|---|---|
+| **Công dụng** | Trả về khoảng cách của cảm biến `i` **chỉ khi** số đo hợp lệ và đủ mới |
+| **Tham số** | `i`: chỉ số cảm biến (0, 1, …); `max_age_ms`: tuổi tối đa (0 = không kiểm tra); `mm`: nơi nhận kết quả |
+| **Trả về** | 1 = có số đo tốt (đã ghi `*mm`); 0 = không có (`*mm` giữ nguyên) |
+| **Chặn CPU** | Không (không dùng I2C) |
+
+**Ví dụ:**
+```c
+uint16_t mm;
+if (TOF_GetRange(&bus, 0, 100, &mm)) {
+    /* mm hop le, moi hon 100 ms */
+} else {
+    /* khong co vat, cam bien loi, hoac so do cu */
+}
+```
+
+**Chọn `max_age_ms`:**
+
+| Chế độ | Gợi ý |
+|---|---|
+| Song song, budget 33 ms | 100 |
+| Tuần tự với N cảm biến | 100 × N |
+| Budget 200 ms (chính xác cao) | 500 |
+
+---
+
+### 6.4. `TOF_Restart` — khởi động lại một cảm biến
+
+```c
+VL53L0X_Error TOF_Restart(TOF_Bus *bus, uint8_t i);
+```
+
+| | |
+|---|---|
+| **Công dụng** | Reset cảm biến `i` bằng XSHUT, gán lại địa chỉ, khởi tạo lại. **Các cảm biến khác vẫn chạy** |
+| **Trả về** | `VL53L0X_ERROR_NONE` (0) nếu thành công; mã lỗi nếu không |
+| **Chặn CPU** | ~0,2 s nếu cảm biến có mặt; vài ms nếu không trả lời |
+
+**Ví dụ: tự phục hồi mỗi giây**
+```c
+static uint32_t t_check = 0;
+if (HAL_GetTick() - t_check >= 1000U) {
+    t_check = HAL_GetTick();
+    if (tof[1].state == TOF_STATE_ERROR) {
+        VL53L0X_Error e = TOF_Restart(&bus, 1);   /* chan CPU ~0,2 s */
+        if (e != VL53L0X_ERROR_NONE) { /* van loi: kiem tra day, nguon */ }
+    }
+}
+```
+
+**Lưu ý:**
+- Mọi cấu hình bạn tự đặt bằng hàm ST (mục 9) **bị mất** sau restart: phải đặt lại.
+- Đừng gọi trong mỗi vòng lặp; mỗi giây một lần là đủ.
+
+---
+
+### 6.5. `TOF_CalibrateOffset` — hiệu chuẩn sai số cố định
+
+```c
+VL53L0X_Error TOF_CalibrateOffset(TOF_Bus *bus, uint8_t i, uint16_t target_mm);
+```
+
+| | |
+|---|---|
+| **Công dụng** | Đo 50 lần một vật ở khoảng cách biết trước, tính offset, áp dụng ngay |
+| **Tham số** | `target_mm`: khoảng cách thật từ mặt cảm biến tới tấm trắng (nên dùng 100) |
+| **Trả về** | 0 = thành công. −6 = không đo được (không có vật). −30 = cảm biến chưa chạy. −4 = tham số sai |
+| **Kết quả** | `tof[i].calib.offset_um` (µm) và `tof[i].calib.valid = 1` |
+| **Chặn CPU** | **~2 s** |
+
+**Ví dụ:**
+```c
+/* Dat tam giay trang cach TOF1 dung 100 mm roi goi: */
+if (TOF_CalibrateOffset(&bus, 0, 100) == VL53L0X_ERROR_NONE) {
+    int32_t off = tof[0].calib.offset_um;     /* vd -7000 = chip doc xa hon 7 mm */
+    (void)off;                                /* luu tof[0].calib vao flash de dung lan sau */
+}
+```
+
+**Lưu ý:**
+- Tấm trắng (giấy A4) đặt vuông góc, không có vật khác trong vùng nhìn, tránh nắng.
+- Kết quả chỉ nằm trong RAM. Muốn giữ sau khi tắt nguồn, lưu `tof[i].calib` vào flash (ví dụ đầy đủ trong [docs Q3 VD8](docs/03_ViDu_GiaiThich.md)).
+
+---
+
+### 6.6. `TOF_I2C_Recover` — gỡ bus I2C bị treo
+
+```c
+void TOF_I2C_Recover(I2C_HandleTypeDef *hi2c, GPIO_TypeDef *port, uint16_t scl_pin, uint16_t sda_pin);
+```
+
+| | |
+|---|---|
+| **Công dụng** | Khi một thiết bị giữ SDA thấp (thường gặp sau reset MCU giữa chừng): tạo 9 xung SCL + STOP, rồi khởi tạo lại I2C |
+| **Tham số** | Bus và chân SCL, SDA (cùng port). Blue Pill I2C1: `GPIOB`, `GPIO_PIN_6`, `GPIO_PIN_7` |
+| **Chặn CPU** | < 1 ms |
+
+**Ví dụ:**
+```c
+TOF_I2C_Recover(&hi2c1, GPIOB, GPIO_PIN_6, GPIO_PIN_7);   /* SCL = PB6, SDA = PB7 */
+(void)TOF_Restart(&bus, 0);
+(void)TOF_Restart(&bus, 1);
+```
+
+**Lưu ý:** hàm ảnh hưởng **mọi thiết bị** trên bus (LCD…). Chỉ gọi khi tất cả cảm biến cùng lỗi.
+
+---
+
+## 7. Đọc dữ liệu trong `TOF_Sensor`
+
+Ngoài các hàm, bạn đọc trực tiếp các trường của `tof[i]`. **Chỉ đọc, không ghi** (trừ `calib` trước `TOF_Init`).
+
+### 7.1. `state` — cảm biến có đang chạy không
+
+| Giá trị | Ý nghĩa |
+|---|---|
+| `TOF_STATE_OFF` (0) | Chưa khởi tạo / đang restart |
+| `TOF_STATE_RUNNING` (1) | Đang đo bình thường |
+| `TOF_STATE_ERROR` (2) | Lỗi, xem `last_error` |
+
+```c
+if (tof[0].state != TOF_STATE_RUNNING) {
+    /* bao loi cam bien 1 (bat LED, hien len LCD...) */
+}
+```
+
+### 7.2. `last_error` — mã lỗi gần nhất
+
+```c
+switch (tof[1].last_error) {
+case VL53L0X_ERROR_NONE:              /* OK */                                   break;
+case VL53L0X_ERROR_CONTROL_INTERFACE: /* -20: khong tra loi I2C: day, nguon */    break;
+case VL53L0X_ERROR_TIME_OUT:          /* -7: khong co so do: day GPIO1? */         break;
+case VL53L0X_ERROR_INVALID_PARAMS:    /* -4: dia chi cau hinh sai */               break;
+default:                                                                         break;
+}
+```
+
+### 7.3. `range_mm` và `range_status` — khoảng cách và chất lượng
+
+| `range_status` | Ý nghĩa | Dùng `range_mm`? |
+|---|---|---|
+| 0 | Hợp lệ | ✔ |
+| 2 | Tín hiệu yếu / không có vật | ✘ |
+| 3 | Vật quá gần | ✘ |
+| 4 | Ngoài tầm | ✘ |
+| 1, 5 | Không chắc chắn / lỗi phần cứng | ✘ |
+| 255 | Chưa có số đo | ✘ |
+
+```c
+uint32_t upd = TOF_Poll(&bus);
+if ((upd & 1UL) && tof[0].range_status == 0) {
+    uint16_t d = tof[0].range_mm;            /* khoang cach (mm) */
+    (void)d;
+} else if ((upd & 1UL) && (tof[0].range_status == 2 || tof[0].range_status == 4)) {
+    /* duong thong, khong co vat trong tam */
+}
+```
+
+### 7.4. `timestamp_ms` — số đo được lấy lúc nào
+
+```c
+uint32_t age_ms = HAL_GetTick() - tof[0].timestamp_ms;   /* so do nay cu bao nhieu ms */
+(void)age_ms;
+```
+
+### 7.5. `err_count` — số lỗi liên tiếp
+
+Đến 5 thì cảm biến chuyển sang `ERROR`. Đọc thành công một lần là về 0.
+```c
+uint8_t warn = (tof[0].err_count >= 2);      /* canh bao som truoc khi ERROR */
+(void)warn;
+```
+
+### 7.6. `calib` — dữ liệu hiệu chuẩn (lưu / nạp)
+
+| Trường | Ý nghĩa |
+|---|---|
+| `refSpadCount`, `isApertureSpads` | Hiệu chuẩn SPAD (thư viện tự đo lần đầu) |
+| `offset_um` | Offset (µm) |
+| `valid` | 1 = dùng các giá trị này khi `TOF_Init` / `TOF_Restart` |
+
+**Nạp giá trị đã lưu trước khi khởi tạo** (giúp khởi động nhanh hơn):
+```c
+tof[0].calib.refSpadCount    = 5;      /* gia tri da luu truoc do */
+tof[0].calib.isApertureSpads = 0;
+tof[0].calib.offset_um       = -7000;
+tof[0].calib.valid           = 1;      /* -> TOF_Init dung gia tri nay */
+TOF_Init(&bus);
+```
+
+### 7.7. `dev` — dùng hàm gốc của ST
+
+```c
+VL53L0X_DEV d = &tof[0].dev;           /* truyen d vao moi ham VL53L0X_... (muc 9) */
+(void)d;
+```
+
+---
+
+## 8. Chương trình chạy thử có sẵn
+
+Dùng khi lắp mạch lần đầu, để kiểm tra dây, địa chỉ và tốc độ đo. **Chỉ thêm một trong hai file** vào project.
+
+### 8.1. `app_tof_dbg.c` — xem bằng Watch của Keil (không cần UART)
+
+```c
+void App_TOF_Dbg_Init(void);         /* USER CODE 2 */
+void App_TOF_Dbg_Loop(void);         /* USER CODE 3, trong while(1) */
+void App_TOF_Dbg_OnError(uint8_t idx);   /* dat breakpoint o day */
+```
+
+**Cách dùng:**
+```c
+#include "app_tof_dbg.h"
+/* USER CODE BEGIN 2 */
+App_TOF_Dbg_Init();
+/* USER CODE BEGIN 3 (trong while) */
+App_TOF_Dbg_Loop();
+```
+
+Trong Keil: Debug (Ctrl+F5) → Run (F5) → Watch 1, gõ **`g_tof`** → bật *Periodic Window Update*.
+
+| Biến | Giá trị đúng |
+|---|---|
+| `g_tof.init_ok` | 2 |
+| `g_tof.scan_before_n` | 0 (trước init không thấy thiết bị nào) |
+| `g_tof.scan_after[0..1]` | 0x54, 0x56 (84, 86 ở dạng thập phân) |
+| `g_tof.s[i].state` | 1 |
+| `g_tof.s[i].range_mm`, `range_status` | khoảng cách, 0 |
+| `g_tof.s[i].rate_hz` | ~30 |
+| `g_tof.poll_us_max` | ≤ ~3000 |
+| `g_tof.loop_count` | tăng liên tục |
+
+**Ra lệnh từ debugger:** sửa giá trị trong Watch, ghi `cmd_arg` trước rồi mới ghi `cmd`:
+```c
+g_tof.cmd_arg = 1;     /* chon TOF2 */
+g_tof.cmd     = 1;     /* 1 = restart; 2 = hieu chuan offset 100 mm; 3 = doi song song/tuan tu; 9 = xoa poll_us_max */
+```
+Kết quả ở `g_tof.cmd_result` (0 = OK).
+
+### 8.2. `app_tof_test.c` — in qua UART
+
+Cần USART1 (PA9, 115200) và tick *Use MicroLIB*.
+```c
+#include "app_tof_test.h"
+/* USER CODE BEGIN 2 */
+App_TOF_Test_Init();
+/* USER CODE BEGIN 3 (trong while) */
+App_TOF_Test_Loop();
+```
+Kết quả in 5 lần mỗi giây:
+```text
+TOF1:  123 mm OK     30 Hz   TOF2:  356 mm OK     30 Hz
+```
+
+---
+
+## 9. Các hàm nâng cao của ST
+
+Gọi trên `&tof[i].dev`. Mọi hàm trả `VL53L0X_Error` (0 = OK).
+
+### ⚠️ Ba quy tắc khi dùng hàm ST cùng `tof_multi`
+
+1. **Hàm `Set…` phải đặt trong mẫu Dừng → Đổi → Chạy lại** (chế độ song song):
+```c
+VL53L0X_DEV d = &tof[0].dev;
+VL53L0X_StopMeasurement(d);
+HAL_Delay(40);                          /* cho lan do dang chay ket thuc */
+/* ... goi cac ham VL53L0X_Set...(d, ...) o day ... */
+VL53L0X_ClearInterruptMask(d, 0);
+VL53L0X_StartMeasurement(d);
+```
+   Ở chế độ tuần tự: chỉ đổi cấu hình, **không** gọi `StartMeasurement`, vì thư viện tự bật đo từng con.
+2. Sau `TOF_Restart`, cấu hình tự đặt bị mất: **đặt lại**.
+3. **Không gọi** các hàm sau khi dùng `tof_multi` (thư viện đã lo): `DataInit`, `StaticInit`, `SetDeviceAddress`, `PerformRefSpadManagement`, `PerformRefCalibration`, `PerformSingleRangingMeasurement`, `GetMeasurementDataReady`.
+
+---
+
+### 9.1. `VL53L0X_SetMeasurementTimingBudgetMicroSeconds` / `Get…` — thời gian một lần đo
+
+```c
+VL53L0X_Error VL53L0X_SetMeasurementTimingBudgetMicroSeconds(VL53L0X_DEV Dev, uint32_t us);
+VL53L0X_Error VL53L0X_GetMeasurementTimingBudgetMicroSeconds(VL53L0X_DEV Dev, uint32_t *us);
+```
+Budget lớn thì chính xác hơn, chậm hơn: ×4 budget làm dao động giảm 2 lần. Khoảng 20000 → 200000 µs.
+
+**Ví dụ:**
+```c
+uint32_t b;
+VL53L0X_GetMeasurementTimingBudgetMicroSeconds(&tof[0].dev, &b);   /* b ~ 33000 (ST lam tron, vd 32908) */
+/* Doi (trong mau Stop/Start): */
+VL53L0X_SetMeasurementTimingBudgetMicroSeconds(&tof[0].dev, 200000);
+bus.budget_us = 200000;    /* BAT BUOC: bao cho thu vien biet, neu khong se bao TIME_OUT */
+```
+💡 Muốn đổi budget cho **mọi** cảm biến, cách đơn giản nhất là sửa `bus.budget_us` rồi gọi lại `TOF_Init(&bus)`.
+
+---
+
+### 9.2. `VL53L0X_SetVcselPulsePeriod` / `Get…` — tăng tầm đo
+
+```c
+VL53L0X_Error VL53L0X_SetVcselPulsePeriod(VL53L0X_DEV Dev, VL53L0X_VcselPeriod type, uint8_t pclks);
+VL53L0X_Error VL53L0X_GetVcselPulsePeriod(VL53L0X_DEV Dev, VL53L0X_VcselPeriod type, uint8_t *pclks);
+```
+
+| `type` | Giá trị hợp lệ | Mặc định | Tầm xa |
+|---|---|---|---|
+| `VL53L0X_VCSEL_PERIOD_PRE_RANGE` | 12, 14, 16, 18 | 14 | 18 |
+| `VL53L0X_VCSEL_PERIOD_FINAL_RANGE` | 8, 10, 12, 14 | 10 | 14 |
+
+**Ví dụ: chế độ tầm xa** (trong mẫu Stop/Start)
+```c
+VL53L0X_SetVcselPulsePeriod(&tof[0].dev, VL53L0X_VCSEL_PERIOD_PRE_RANGE, 18);
+VL53L0X_SetVcselPulsePeriod(&tof[0].dev, VL53L0X_VCSEL_PERIOD_FINAL_RANGE, 14);
+VL53L0X_SetLimitCheckValue(&tof[0].dev, VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE,
+                           (FixPoint1616_t)(0.10 * 65536));      /* ha nguong tin hieu */
+```
+
+---
+
+### 9.3. `VL53L0X_SetLimitCheckValue` / `GetLimitCheckValue` — ngưỡng chất lượng
+
+```c
+VL53L0X_Error VL53L0X_SetLimitCheckValue(VL53L0X_DEV Dev, uint16_t id, FixPoint1616_t value);
+VL53L0X_Error VL53L0X_GetLimitCheckValue(VL53L0X_DEV Dev, uint16_t id, FixPoint1616_t *value);
+```
+
+| `id` | Đơn vị | Mặc định | Ý nghĩa |
+|---|---|---|---|
+| `VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE` | MCPS | 0,25 | Tín hiệu nhỏ hơn mức này thì status 2 |
+| `VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE` | mm | 18 | Chỉ có tác dụng khi `sigma_check = 1` |
+
+Giá trị dạng **16.16**: số thực × 65536.
+
+**Ví dụ:**
+```c
+FixPoint1616_t v;
+VL53L0X_GetLimitCheckValue(&tof[0].dev, VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE, &v);
+/* v = 16384 -> 16384 / 65536 = 0,25 MCPS */
+```
+
+---
+
+### 9.4. `VL53L0X_SetLimitCheckEnable` / `GetLimitCheckEnable` — bật/tắt một kiểm tra
+
+```c
+VL53L0X_Error VL53L0X_SetLimitCheckEnable(VL53L0X_DEV Dev, uint16_t id, uint8_t enable);
+VL53L0X_Error VL53L0X_GetLimitCheckEnable(VL53L0X_DEV Dev, uint16_t id, uint8_t *enable);
+```
+**Ví dụ: kiểm tra sigma đang bật hay tắt**
+```c
+uint8_t en;
+VL53L0X_GetLimitCheckEnable(&tof[0].dev, VL53L0X_CHECKENABLE_SIGMA_FINAL_RANGE, &en);
+/* en = 0 khi bus.sigma_check = 0 (mac dinh) */
+```
+💡 Muốn bật sigma cho cả bus thì đặt `bus.sigma_check = 1` trước `TOF_Init`, không cần gọi hàm này.
+
+---
+
+### 9.5. `VL53L0X_GetLimitCheckCurrent` — tín hiệu của lần đo vừa rồi (không tốn I2C)
+
+```c
+VL53L0X_Error VL53L0X_GetLimitCheckCurrent(VL53L0X_DEV Dev, uint16_t id, FixPoint1616_t *value);
+```
+Đọc giá trị **đã lưu** sau lần đọc gần nhất của thư viện: không truy cập I2C, gọi thoải mái.
+
+**Ví dụ: cường độ phản xạ** (vật sáng màu, ở gần thì lớn)
+```c
+FixPoint1616_t sig;
+VL53L0X_GetLimitCheckCurrent(&tof[0].dev, VL53L0X_CHECKENABLE_SIGNAL_RATE_FINAL_RANGE, &sig);
+uint32_t sig_kcps = (uint32_t)(((uint64_t)sig * 1000U) >> 16);   /* MCPS (16.16) -> kcps */
+(void)sig_kcps;
+```
+
+---
+
+### 9.6. `VL53L0X_GetRangingMeasurementData` — dữ liệu chi tiết của lần đo
+
+```c
+VL53L0X_Error VL53L0X_GetRangingMeasurementData(VL53L0X_DEV Dev, VL53L0X_RangingMeasurementData_t *m);
+```
+Đọc lại 12 byte kết quả gần nhất từ chip (1 giao dịch I2C, ~1,4 ms). Gọi **sau** khi `TOF_Poll` báo có số đo mới.
+
+| Trường | Đổi ra số thực |
+|---|---|
+| `RangeMilliMeter` | mm |
+| `RangeStatus` | xem mục 13 |
+| `SignalRateRtnMegaCps` | `/ 65536` → MCPS |
+| `AmbientRateRtnMegaCps` | `/ 65536` → MCPS (ánh sáng môi trường) |
+| `EffectiveSpadRtnCount` | `/ 256` → số SPAD |
+
+**Ví dụ: đo ánh sáng môi trường** (nắng mạnh làm giảm tầm đo)
+```c
+VL53L0X_RangingMeasurementData_t m;
+if (VL53L0X_GetRangingMeasurementData(&tof[0].dev, &m) == VL53L0X_ERROR_NONE) {
+    uint32_t amb_kcps = (uint32_t)(((uint64_t)m.AmbientRateRtnMegaCps * 1000U) >> 16);
+    (void)amb_kcps;
+}
+```
+
+---
+
+### 9.7. `VL53L0X_GetOffsetCalibrationDataMicroMeter` / `Set…` — đọc / đặt offset
+
+```c
+VL53L0X_Error VL53L0X_GetOffsetCalibrationDataMicroMeter(VL53L0X_DEV Dev, int32_t *um);
+VL53L0X_Error VL53L0X_SetOffsetCalibrationDataMicroMeter(VL53L0X_DEV Dev, int32_t um);
+```
+Khoảng cho phép: −512000 … +511000 µm, bước 250 µm.
+
+**Ví dụ: chỉnh tay** (chip đọc dư 5 mm thì offset = −5000)
+```c
+int32_t off;
+VL53L0X_GetOffsetCalibrationDataMicroMeter(&tof[0].dev, &off);
+VL53L0X_SetOffsetCalibrationDataMicroMeter(&tof[0].dev, off - 5000);   /* trong mau Stop/Start */
+tof[0].calib.offset_um = off - 5000;                                    /* de TOF_Restart dung lai */
+tof[0].calib.valid     = 1;
+```
+
+---
+
+### 9.8. Hiệu chuẩn crosstalk — chỉ khi có kính/mica che phía trước
+
+```c
+VL53L0X_Error VL53L0X_PerformXTalkCalibration(VL53L0X_DEV Dev, FixPoint1616_t dist_mm, FixPoint1616_t *rate);
+VL53L0X_Error VL53L0X_SetXTalkCompensationRateMegaCps(VL53L0X_DEV Dev, FixPoint1616_t rate);
+VL53L0X_Error VL53L0X_GetXTalkCompensationRateMegaCps(VL53L0X_DEV Dev, FixPoint1616_t *rate);
+VL53L0X_Error VL53L0X_SetXTalkCompensationEnable(VL53L0X_DEV Dev, uint8_t enable);
+VL53L0X_Error VL53L0X_GetXTalkCompensationEnable(VL53L0X_DEV Dev, uint8_t *enable);
+```
+**Ví dụ:** đặt tấm **xám** cách 600 mm, phía sau tấm kính. Hàm chặn CPU ~2 s.
+```c
+FixPoint1616_t xtalk;
+VL53L0X_StopMeasurement(&tof[0].dev);
+HAL_Delay(40);
+if (VL53L0X_PerformXTalkCalibration(&tof[0].dev, (FixPoint1616_t)600 << 16, &xtalk) == VL53L0X_ERROR_NONE) {
+    /* luu xtalk; lan sau: SetXTalkCompensationRateMegaCps(d, xtalk) + SetXTalkCompensationEnable(d, 1) */
+}
+VL53L0X_SetDeviceMode(&tof[0].dev, VL53L0X_DEVICEMODE_CONTINUOUS_RANGING);   /* ham tren doi sang SINGLE */
+VL53L0X_ClearInterruptMask(&tof[0].dev, 0);
+VL53L0X_StartMeasurement(&tof[0].dev);
+```
+
+---
+
+### 9.9. `VL53L0X_StopMeasurement` / `StartMeasurement` / `ClearInterruptMask` — điều khiển đo
+
+```c
+VL53L0X_Error VL53L0X_StopMeasurement(VL53L0X_DEV Dev);
+VL53L0X_Error VL53L0X_StartMeasurement(VL53L0X_DEV Dev);
+VL53L0X_Error VL53L0X_ClearInterruptMask(VL53L0X_DEV Dev, uint32_t mask);   /* mask = 0 */
+```
+**Ví dụ: tạm dừng một cảm biến để tiết kiệm điện** (chế độ song song)
+```c
+VL53L0X_StopMeasurement(&tof[1].dev);        /* TOF2 ngung phat laser */
+/* ... sau nay chay lai: */
+VL53L0X_ClearInterruptMask(&tof[1].dev, 0);
+VL53L0X_StartMeasurement(&tof[1].dev);
+```
+⚠️ Dừng lâu hơn ~0,7 s thì thư viện coi cảm biến bị lỗi (TIME_OUT) và chuyển sang ERROR. Muốn tắt hẳn một cảm biến, tốt nhất **khởi tạo `bus` không có nó**.
+
+---
+
+### 9.10. `VL53L0X_GetDeviceMode` — chế độ đo hiện tại
+
+```c
+VL53L0X_Error VL53L0X_GetDeviceMode(VL53L0X_DEV Dev, VL53L0X_DeviceModes *mode);
+```
+```c
+VL53L0X_DeviceModes mode;
+VL53L0X_GetDeviceMode(&tof[0].dev, &mode);
+/* VL53L0X_DEVICEMODE_CONTINUOUS_RANGING (1) o che do song song, SINGLE_RANGING (0) o tuan tu */
+```
+
+---
+
+### 9.11. `VL53L0X_GetVersion` — phiên bản API của ST
+
+```c
+VL53L0X_Error VL53L0X_GetVersion(VL53L0X_Version_t *v);
+```
+```c
+VL53L0X_Version_t v;
+VL53L0X_GetVersion(&v);      /* v.major = 1, v.minor = 0, v.build = 4, v.revision = 4960 */
+```
+
+---
+
+### 9.12. `VL53L0X_GetDeviceInfo` / `GetProductRevision` — thông tin con chip
+
+```c
+VL53L0X_Error VL53L0X_GetDeviceInfo(VL53L0X_DEV Dev, VL53L0X_DeviceInfo_t *info);
+VL53L0X_Error VL53L0X_GetProductRevision(VL53L0X_DEV Dev, uint8_t *major, uint8_t *minor);
+```
+Đọc từ bộ nhớ NVM của chip, nên gọi khi **đã dừng đo**.
+```c
+VL53L0X_DeviceInfo_t info;
+VL53L0X_StopMeasurement(&tof[0].dev);
+HAL_Delay(40);
+if (VL53L0X_GetDeviceInfo(&tof[0].dev, &info) == VL53L0X_ERROR_NONE) {
+    /* info.Name (vd "VL53L0X ES1 or later"), info.Type = "VL53L0X",
+       info.ProductRevisionMajor, info.ProductRevisionMinor */
+}
+VL53L0X_ClearInterruptMask(&tof[0].dev, 0);
+VL53L0X_StartMeasurement(&tof[0].dev);
+```
+
+---
+
+### 9.13. `VL53L0X_GetReferenceSpads` / `GetRefCalibration` — thông số hiệu chuẩn bên trong
+
+```c
+VL53L0X_Error VL53L0X_GetReferenceSpads(VL53L0X_DEV Dev, uint32_t *count, uint8_t *isAperture);
+VL53L0X_Error VL53L0X_GetRefCalibration(VL53L0X_DEV Dev, uint8_t *vhv, uint8_t *phase);
+```
+```c
+uint32_t spad;
+uint8_t  aperture;
+VL53L0X_GetReferenceSpads(&tof[0].dev, &spad, &aperture);   /* = tof[0].calib.refSpadCount */
+```
+`GetRefCalibration` có ghi thanh ghi, nên **chỉ gọi khi đã dừng đo**.
+
+---
+
+### 9.14. `VL53L0X_GetPalErrorString` / `GetRangeStatusString` — chuỗi mô tả (tiếng Anh)
+
+```c
+VL53L0X_Error VL53L0X_GetPalErrorString(VL53L0X_Error err, char *buf);       /* buf >= 32 byte */
+VL53L0X_Error VL53L0X_GetRangeStatusString(uint8_t status, char *buf);       /* buf >= 32 byte */
+```
+```c
+char txt[VL53L0X_MAX_STRING_LENGTH];                 /* 32 byte */
+VL53L0X_GetPalErrorString(tof[0].last_error, txt);   /* vd "Control Interface Error" */
+VL53L0X_GetRangeStatusString(tof[0].range_status, txt);   /* vd "Range Valid" */
+```
+💡 Define `USE_EMPTY_STRING` để bỏ các chuỗi này, tiết kiệm ~1–2 KB flash; khi đó chuỗi trả về là rỗng.
+
+---
+
+### 9.15. `VL53L0X_GetPalState` — trạng thái bên trong API
+
+```c
+VL53L0X_Error VL53L0X_GetPalState(VL53L0X_DEV Dev, VL53L0X_State *st);
+```
+```c
+VL53L0X_State st;
+VL53L0X_GetPalState(&tof[0].dev, &st);     /* VL53L0X_STATE_RUNNING (4) hoac IDLE (3) */
+```
+
+---
+
+### 9.16. Ngắt theo ngưỡng khoảng cách — `SetGpioConfig` + `SetInterruptThresholds` ⚠️ nâng cao
+
+```c
+VL53L0X_Error VL53L0X_SetGpioConfig(VL53L0X_DEV Dev, uint8_t pin, VL53L0X_DeviceModes mode,
+                                    VL53L0X_GpioFunctionality func, VL53L0X_InterruptPolarity pol);
+VL53L0X_Error VL53L0X_SetInterruptThresholds(VL53L0X_DEV Dev, VL53L0X_DeviceModes mode,
+                                             FixPoint1616_t low_mm, FixPoint1616_t high_mm);
+```
+Chân GPIO1 chỉ báo khi khoảng cách **< low** (hoặc **> high**, hoặc ra ngoài khoảng, tuỳ `func`).
+```c
+/* Truoc tien: tof[0].gpio1_port = NULL (thu vien khong dung GPIO1 de doc nua) */
+VL53L0X_SetGpioConfig(&tof[0].dev, 0, VL53L0X_DEVICEMODE_CONTINUOUS_RANGING,
+                      VL53L0X_GPIOFUNCTIONALITY_THRESHOLD_CROSSED_LOW,
+                      VL53L0X_INTERRUPTPOLARITY_LOW);
+VL53L0X_SetInterruptThresholds(&tof[0].dev, VL53L0X_DEVICEMODE_CONTINUOUS_RANGING,
+                               (FixPoint1616_t)300 << 16, (FixPoint1616_t)400 << 16);
+```
+⚠️ **Chưa kiểm thử cùng `tof_multi`.**
+- Ở chế độ này GPIO1 **không còn** nghĩa "có số đo mới". Phải đặt `gpio1_port = NULL` cho cảm biến đó.
+- Gọi trong mẫu Stop/Start.
+- Mất sau `TOF_Restart`.
+
+---
+
+## 10. Các hàm cấp thấp (platform)
+
+Thường **không cần** dùng; lõi ST gọi chúng. Hữu ích khi cần đọc nhanh một thanh ghi.
+
+| Hàm | Công dụng |
+|---|---|
+| `VL53L0X_RdByte(Dev, reg, *u8)` | Đọc 1 byte |
+| `VL53L0X_RdWord(Dev, reg, *u16)` | Đọc 2 byte (byte cao trước) |
+| `VL53L0X_RdDWord(Dev, reg, *u32)` | Đọc 4 byte |
+| `VL53L0X_WrByte(Dev, reg, u8)` | Ghi 1 byte |
+| `VL53L0X_WrWord(Dev, reg, u16)` | Ghi 2 byte |
+| `VL53L0X_WrDWord(Dev, reg, u32)` | Ghi 4 byte |
+| `VL53L0X_ReadMulti(Dev, reg, buf, n)` | Đọc n byte liên tiếp |
+| `VL53L0X_WriteMulti(Dev, reg, buf, n)` | Ghi n byte liên tiếp |
+| `VL53L0X_UpdateByte(Dev, reg, and, or)` | Đọc → `(x & and) \| or` → ghi |
+| `VL53L0X_PollingDelay(Dev)` | Chờ 1 ms (dùng trong vòng chờ của ST) |
+
+Lỗi I2C (sau 1 lần thử lại) → trả về **−20**.
+
+**Ví dụ: kiểm tra đúng là VL53L0X**
+```c
+uint8_t id = 0;
+if (VL53L0X_RdByte(&tof[0].dev, VL53L0X_REG_IDENTIFICATION_MODEL_ID, &id) == VL53L0X_ERROR_NONE
+    && id == 0xEE) {
+    /* dung la VL53L0X, dang tra loi o dia chi tof[0].addr */
+}
+```
+**Ví dụ: đọc khoảng cách thô** (không kiểm tra chất lượng, chỉ để thử nghiệm)
+```c
+uint16_t raw;
+VL53L0X_RdWord(&tof[0].dev, VL53L0X_REG_RESULT_RANGE_STATUS + 10, &raw);   /* thanh ghi 0x1E */
+```
+⚠️ **Không ghi** thanh ghi tuỳ ý khi không chắc chắn: có thể làm cảm biến chạy sai cho tới khi restart.
+
+---
+
+## 11. Tuỳ chỉnh bằng macro
+
+Thêm vào *Options for Target → C/C++ → Define*, phân cách bằng dấu phẩy:
+```text
+USE_HAL_DRIVER,STM32F103xB,USE_I2C_2V8,USE_EMPTY_STRING,TOF_MAX_ERRORS=10
+```
+
+| Macro | Mặc định | Công dụng |
+|---|---|---|
+| `USE_I2C_2V8` | tắt | **Nên bật** với module GY-530 (I/O 2,8 V) |
+| `USE_EMPTY_STRING` | tắt | Bỏ chuỗi mô tả lỗi, tiết kiệm ~1–2 KB flash |
+| `VL53L0X_HAL_HEADER` | `"stm32f1xx_hal.h"` | Dùng chip khác, ví dụ `VL53L0X_HAL_HEADER="stm32f4xx_hal.h"` |
+| `VL53L0X_I2C_TIMEOUT_MS` | 10 | Timeout mỗi lệnh I2C |
+| `VL53L0X_I2C_RETRIES` | 1 | Số lần thử lại khi I2C lỗi |
+| `TOF_BOOT_MS` | 2 | Chờ sau khi bật XSHUT |
+| `TOF_MAX_ERRORS` | 5 | Số lỗi liên tiếp trước khi chuyển sang ERROR |
+| `TOF_MAX_READS_PER_POLL` | 1 | Số cảm biến đọc tối đa mỗi lần `TOF_Poll` |
+| `TOF_STALE_FACTOR` | 4 | Quá `budget × hệ số + 10 ms` không có số đo thì tính 1 lỗi |
+
+---
+
+## 12. Sự cố thường gặp
+
+| Hiện tượng | Nguyên nhân hay gặp | Cách xử lý |
+|---|---|---|
+| `TOF_Init` trả 0, lỗi −20 ở mọi cảm biến | SDA/SCL lắp ngược; thiếu nguồn VIN/GND; chưa bật I2C1; gọi `TOF_Init` trước `MX_I2C1_Init` | Kiểm tra PB6 = SCL, PB7 = SDA, nguồn 3,3 V, thứ tự gọi hàm |
+| Chỉ một cảm biến lỗi −20 | Dây XSHUT của nó, hoặc module hỏng | Đổi chỗ hai module để khoanh vùng |
+| Quét I2C trước init đã thấy 0x52 | Một chân XSHUT chưa nối hoặc sai chân: hai chip cùng địa chỉ | Kiểm tra dây và label XSHUT trong CubeMX |
+| Có vật mà `range_status` luôn 2, `range_mm` ≈ 8190 | **Chưa bóc miếng dán bảo vệ**; kính che bẩn | Bóc miếng dán, lau mắt cảm biến |
+| Lỗi −7 lặp lại, I2C vẫn tốt | Dây GPIO1 đứt hoặc sai chân | Thử đặt `gpio1_port = NULL` |
+| Hai cảm biến đặt sát nhau, số đo nhảy | Nhiễu laser lẫn nhau | `bus.mode = TOF_MODE_SEQUENTIAL` |
+| Số đo lệch cố định vài mm đến vài cm | Offset | `TOF_CalibrateOffset` |
+| Sau khi đổi budget lên 200 ms, cảm biến báo −7 | Chưa sửa `bus.budget_us` | `bus.budget_us = 200000` |
+| Chương trình treo sau khi reset nóng | Bus I2C bị kẹt | Tắt nguồn cả mạch, hoặc `TOF_I2C_Recover` |
+| Keil báo lỗi ở `LOG_FUNCTION_START` | Chưa bật C99 | Bật C99 |
+| Keil: `L6218E Undefined symbol VL53L0X_...` | Thiếu file `.c` | Xem bước 3 |
+| Keil: `L6050U code size exceeds` | Keil bản Lite giới hạn 32 KB | Tối ưu `-Oz`, `USE_EMPTY_STRING`, hoặc MDK Community |
+| Watch đứng yên | Chưa bật *Periodic Window Update* | Bật mục đó |
+| HardFault | Thiếu stack | Minimum Stack = 0x800 |
+
+---
+
+## 13. Bảng tra mã lỗi và trạng thái
+
+### Mã lỗi (`last_error`, giá trị trả về của các hàm)
+
+| Mã | Tên macro | Ý nghĩa |
+|---|---|---|
+| 0 | `VL53L0X_ERROR_NONE` | Thành công |
+| −4 | `VL53L0X_ERROR_INVALID_PARAMS` | Tham số / địa chỉ sai |
+| −6 | `VL53L0X_ERROR_RANGE_ERROR` | Không có số đo hợp lệ (khi hiệu chuẩn) |
+| −7 | `VL53L0X_ERROR_TIME_OUT` | Quá lâu không có số đo |
+| −12 | `VL53L0X_ERROR_INTERRUPT_NOT_CLEARED` | Không xoá được cờ ngắt |
+| −20 | `VL53L0X_ERROR_CONTROL_INTERFACE` | **Không trả lời I2C** |
+| −30 | `VL53L0X_ERROR_INVALID_COMMAND` | Gọi sai lúc (ví dụ cảm biến chưa chạy) |
+| −50 | `VL53L0X_ERROR_REF_SPAD_INIT` | Hiệu chuẩn SPAD lỗi (bị che?) |
+
+### Trạng thái số đo (`range_status`)
+
+| Giá trị | Ý nghĩa |
+|---|---|
+| 0 | Hợp lệ |
+| 1 | Không chắc chắn (sigma) |
+| 2 | Tín hiệu yếu / không có vật |
+| 3 | Vật quá gần |
+| 4 | Ngoài tầm |
+| 5 | Lỗi phần cứng |
+| 255 | Chưa có số đo |
+
+### Thông số nhanh
+
+| Thông số | Giá trị |
+|---|---|
+| Địa chỉ mặc định | 0x52 (8-bit) |
+| Tầm đo mặc định / tầm xa | ~1,2 m / ~2 m |
+| Góc nhìn | ~25° |
+| Tốc độ đo (budget 33 ms) | ~30 Hz mỗi cảm biến (song song) |
+| RAM mỗi cảm biến | ~470 byte |
+| Flash (lõi ST) | ước tính ~25–30 KB |
+
+---
+
+## 14. Nên và không nên
+
+| ✔ Nên | ✘ Không nên |
+|---|---|
+| Gọi `TOF_Poll` **một lần** mỗi vòng `while(1)` | Gọi `TOF_Poll` trong hàm ngắt |
+| Dùng `TOF_GetRange` hoặc kiểm tra `range_status == 0` | Dùng `range_mm` mà không kiểm tra |
+| Khai báo `tof[]`, `bus` là biến toàn cục | Khai báo trong hàm (tràn stack, ~470 byte mỗi cảm biến) |
+| Cấu hình XSHUT: Open-Drain, mức Low | Để XSHUT trống hoặc mức High ban đầu |
+| Đặt `bus.budget_us` đúng budget đang dùng | Đổi budget bằng hàm ST mà quên báo thư viện |
+| Đặt lại cấu hình riêng sau `TOF_Restart` | Cho rằng cấu hình tự đặt vẫn còn sau restart |
+| Bus I2C 100 kHz nếu có LCD PCF8574 | Chạy 400 kHz khi có PCF8574 trên bus |
+| Bật C99, define `USE_I2C_2V8` | Thêm file Windows của ST vào project |
+| Lưu `calib` vào flash sau khi hiệu chuẩn | Hiệu chuẩn lại mỗi lần khởi động |
+| `HAL_GetTick() - t >= khoảng` khi so sánh thời gian | `HAL_GetTick() > t + khoảng` (sai khi tick tràn) |
+
+---
+
+> 📚 Tài liệu chi tiết hơn: [Sách giáo khoa](docs/01_SachGiaoKhoa.md) · [Tham khảo API](docs/02_SachThamKhao_API.md) · [12 ví dụ](docs/03_ViDu_GiaiThich.md) · [Bài tập](docs/04_BaiTap.md) · [Lời giải](docs/05_LoiGiai.md) · [Ôn tập](docs/06_OnThi.md) · [Nâng cao](docs/07_ChuyenDe_NangCao.md)
+
+
 # Bộ sách: Thư viện VL53L0X đa cảm biến cho STM32 HAL
 
 > Áp dụng cho thư viện trong thư mục `vl53l0x_stm32/` (lõi ST STSW-IMG005 v1.0.4 + lớp `platform` + lớp `tof_multi`), vi điều khiển STM32F103C8T6 (Blue Pill), STM32CubeMX và Keil MDK.
